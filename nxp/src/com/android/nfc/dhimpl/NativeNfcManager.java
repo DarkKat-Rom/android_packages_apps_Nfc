@@ -16,46 +16,49 @@
 
 package com.android.nfc.dhimpl;
 
+import com.android.nfc.DeviceHost;
+import com.android.nfc.LlcpException;
+
+import android.annotation.SdkConstant;
+import android.annotation.SdkConstant.SdkConstantType;
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.nfc.ErrorCodes;
 import android.nfc.tech.Ndef;
 import android.nfc.tech.TagTechnology;
 import android.util.Log;
-
-import com.android.nfc.DeviceHost;
-import com.android.nfc.LlcpException;
 import com.android.nfc.NfcDiscoveryParameters;
 
+import java.io.File;
 import java.io.FileDescriptor;
-import java.util.Arrays;
-import java.util.Iterator;
-import java.util.HashMap;
 
 /**
  * Native interface to the NFC Manager functions
  */
 public class NativeNfcManager implements DeviceHost {
     private static final String TAG = "NativeNfcManager";
-    static final String PREF = "NciDeviceHost";
 
-    static final int DEFAULT_LLCP_MIU = 1980;
-    static final int DEFAULT_LLCP_RWSIZE = 2;
+    private static final String NFC_CONTROLLER_FIRMWARE_FILE_NAME = "/vendor/firmware/libpn544_fw.so";
 
-    static final String DRIVER_NAME = "android-nci";
+    static final String PREF = "NxpDeviceHost";
+
+    private static final String PREF_FIRMWARE_MODTIME = "firmware_modtime";
+    private static final long FIRMWARE_MODTIME_DEFAULT = -1;
+
+    static final String DRIVER_NAME = "nxp";
+
+    static final int DEFAULT_LLCP_MIU = 128;
+    static final int DEFAULT_LLCP_RWSIZE = 1;
 
     static {
-        System.loadLibrary("nfc_nci_jni");
+        System.loadLibrary("nfc_jni");
     }
 
     /* Native structure */
     private long mNative;
 
-    private int mIsoDepMaxTransceiveLength;
     private final DeviceHostListener mListener;
     private final Context mContext;
-
-    private final Object mLock = new Object();
-    private final HashMap<Integer, byte[]> mT3tIdentifiers = new HashMap<Integer, byte[]>();
 
     public NativeNfcManager(Context context, DeviceHostListener listener) {
         mListener = listener;
@@ -71,18 +74,53 @@ public class NativeNfcManager implements DeviceHost {
 
     @Override
     public void checkFirmware() {
-        doDownload();
+        // Check that the NFC controller firmware is up to date.  This
+        // ensures that firmware updates are applied in a timely fashion,
+        // and makes it much less likely that the user will have to wait
+        // for a firmware download when they enable NFC in the settings
+        // app.  Firmware download can take some time, so this should be
+        // run in a separate thread.
+
+        // check the timestamp of the firmware file
+        File firmwareFile;
+        int nbRetry = 0;
+        try {
+            firmwareFile = new File(NFC_CONTROLLER_FIRMWARE_FILE_NAME);
+        } catch(NullPointerException npe) {
+            Log.e(TAG,"path to firmware file was null");
+            return;
+        }
+
+        long modtime = firmwareFile.lastModified();
+
+        SharedPreferences prefs = mContext.getSharedPreferences(PREF, Context.MODE_PRIVATE);
+        long prev_fw_modtime = prefs.getLong(PREF_FIRMWARE_MODTIME, FIRMWARE_MODTIME_DEFAULT);
+        Log.d(TAG,"prev modtime: " + prev_fw_modtime);
+        Log.d(TAG,"new modtime: " + modtime);
+        if (prev_fw_modtime == modtime) {
+            return;
+        }
+
+        // FW download.
+        while(nbRetry < 5) {
+            Log.d(TAG,"Perform Download");
+            if(doDownload()) {
+                Log.d(TAG,"Download Success");
+                // Now that we've finished updating the firmware, save the new modtime.
+                prefs.edit().putLong(PREF_FIRMWARE_MODTIME, modtime).apply();
+                break;
+            } else {
+                Log.d(TAG,"Download Failed");
+                nbRetry++;
+            }
+        }
     }
 
     private native boolean doInitialize();
 
-    private native int getIsoDepMaxTransceiveLength();
-
     @Override
     public boolean initialize() {
-        boolean ret = doInitialize();
-        mIsoDepMaxTransceiveLength = getIsoDepMaxTransceiveLength();
-        return ret;
+        return doInitialize();
     }
 
     private native void doEnableDtaMode();
@@ -113,56 +151,44 @@ public class NativeNfcManager implements DeviceHost {
     }
 
     @Override
-    public native boolean sendRawFrame(byte[] data);
+    public boolean sendRawFrame(byte[] data) {
+        return false;
+    }
 
     @Override
-    public native boolean routeAid(byte[] aid, int route, int aidInfo);
+    public boolean routeAid(byte[] aid, int route, int aidInfo) {
+        return false;
+    }
 
     @Override
-    public native boolean unrouteAid(byte[] aid);
+    public boolean unrouteAid(byte[] aid) {
+       return false;
+    }
 
     @Override
-    public native boolean commitRouting();
-
-    public native int doRegisterT3tIdentifier(byte[] t3tIdentifier);
+    public boolean commitRouting() {
+        return false;
+    }
 
     @Override
     public void registerT3tIdentifier(byte[] t3tIdentifier) {
-        synchronized (mLock) {
-            int handle = doRegisterT3tIdentifier(t3tIdentifier);
-            if (handle != 0xffff) {
-                mT3tIdentifiers.put(Integer.valueOf(handle), t3tIdentifier);
-            }
-        }
+        return;
     }
-
-    public native void doDeregisterT3tIdentifier(int handle);
 
     @Override
     public void deregisterT3tIdentifier(byte[] t3tIdentifier) {
-        synchronized (mLock) {
-            Iterator<Integer> it = mT3tIdentifiers.keySet().iterator();
-            while (it.hasNext()) {
-                int handle = it.next().intValue();
-                byte[] value = mT3tIdentifiers.get(handle);
-                if (Arrays.equals(value, t3tIdentifier)) {
-                    doDeregisterT3tIdentifier(handle);
-                    mT3tIdentifiers.remove(handle);
-                    break;
-                }
-            }
-        }
+        return;
     }
 
     @Override
     public void clearT3tIdentifiersCache() {
-        synchronized (mLock) {
-            mT3tIdentifiers.clear();
-        }
+        return;
     }
 
     @Override
-    public native int getLfT3tMax();
+    public int getLfT3tMax() {
+        return 0;
+    }
 
     @Override
     public native void doSetScreenState(int screen_state_mask);
@@ -173,14 +199,12 @@ public class NativeNfcManager implements DeviceHost {
     private native void doEnableDiscovery(int techMask,
                                           boolean enableLowPowerPolling,
                                           boolean enableReaderMode,
-                                          boolean enableHostRouting,
                                           boolean enableP2p,
                                           boolean restart);
     @Override
     public void enableDiscovery(NfcDiscoveryParameters params, boolean restart) {
         doEnableDiscovery(params.getTechMask(), params.shouldEnableLowPowerDiscovery(),
-                params.shouldEnableReaderMode(), params.shouldEnableHostRouting(),
-                params.shouldEnableP2p(), restart);
+                params.shouldEnableReaderMode(), params.shouldEnableP2p(), restart);
     }
 
     @Override
@@ -290,7 +314,8 @@ public class NativeNfcManager implements DeviceHost {
 
     @Override
     public boolean canMakeReadOnly(int ndefType) {
-        return (ndefType == Ndef.TYPE_1 || ndefType == Ndef.TYPE_2);
+        return (ndefType == Ndef.TYPE_1 || ndefType == Ndef.TYPE_2 ||
+                ndefType == Ndef.TYPE_MIFARE_CLASSIC);
     }
 
     @Override
@@ -301,14 +326,16 @@ public class NativeNfcManager implements DeviceHost {
             case (TagTechnology.MIFARE_ULTRALIGHT):
                 return 253; // PN544 RF buffer = 255 bytes, subtract two for CRC
             case (TagTechnology.NFC_B):
-                /////////////////////////////////////////////////////////////////
-                // Broadcom: Since BCM2079x supports this, set NfcB max size.
-                //return 0; // PN544 does not support transceive of raw NfcB
-                return 253; // PN544 does not support transceive of raw NfcB
+                return 0; // PN544 does not support transceive of raw NfcB
             case (TagTechnology.NFC_V):
                 return 253; // PN544 RF buffer = 255 bytes, subtract two for CRC
             case (TagTechnology.ISO_DEP):
-                return mIsoDepMaxTransceiveLength;
+                /* The maximum length of a normal IsoDep frame consists of:
+                 * CLA, INS, P1, P2, LC, LE + 255 payload bytes = 261 bytes
+                 * such a frame is supported. Extended length frames however
+                 * are not supported.
+                 */
+                return 261; // Will be automatically split in two frames on the RF layer
             case (TagTechnology.NFC_F):
                 return 252; // PN544 RF buffer = 255 bytes, subtract one for SoD, two for CRC
             default:
@@ -330,10 +357,22 @@ public class NativeNfcManager implements DeviceHost {
     }
 
     @Override
+    public boolean enableScreenOffSuspend() {
+        // Snooze mode not supported on NXP silicon
+        Log.i(TAG, "Snooze mode is not supported on NXP NFCC");
+        return false;
+    }
+
+    @Override
+    public boolean disableScreenOffSuspend() {
+        // Snooze mode not supported on NXP silicon
+        Log.i(TAG, "Snooze mode is not supported on NXP NFCC");
+        return true;
+    }
+
+    @Override
     public boolean getExtendedLengthApdusSupported() {
-        /* 261 is the default size if extended length frames aren't supported */
-        if (getMaxTransceiveLength(TagTechnology.ISO_DEP) > 261)
-            return true;
+        // Not supported on the PN544
         return false;
     }
 
@@ -351,20 +390,6 @@ public class NativeNfcManager implements DeviceHost {
     @Override
     public void dump(FileDescriptor fd) {
         doDump(fd);
-    }
-
-    private native void doEnableScreenOffSuspend();
-    @Override
-    public boolean enableScreenOffSuspend() {
-        doEnableScreenOffSuspend();
-        return true;
-    }
-
-    private native void doDisableScreenOffSuspend();
-    @Override
-    public boolean disableScreenOffSuspend() {
-        doDisableScreenOffSuspend();
-        return true;
     }
 
     /**
@@ -388,13 +413,6 @@ public class NativeNfcManager implements DeviceHost {
         mListener.onLlcpLinkDeactivated(device);
     }
 
-    /**
-     * Notifies first packet received from remote LLCP
-     */
-    private void notifyLlcpLinkFirstPacketReceived(NativeP2pDevice device) {
-        mListener.onLlcpFirstPacketReceived(device);
-    }
-
     private void notifyHostEmuActivated(int technology) {
         mListener.onHostCardEmulationActivated(technology);
     }
@@ -414,5 +432,4 @@ public class NativeNfcManager implements DeviceHost {
     private void notifyRfFieldDeactivated() {
         mListener.onRemoteFieldDeactivated();
     }
-
 }
